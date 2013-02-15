@@ -1,0 +1,235 @@
+#!/usr/bin/env convsh
+
+# Convsh script um2nc
+#
+# Convert input UM files into Netcdf files.
+#
+# This program converts any number of input UM files (or PP files)
+# into Netcdf files. The output files are written to the current
+# directory by default.
+#
+
+# Procedure that prints a usage message to the screen.
+proc show_usage {} {
+    global argv0
+    set progname [file tail $argv0]
+    puts ""
+    puts "Name:"
+    puts "    $progname -- Convert input UM files to Netcdf"
+    puts ""
+    puts "Synopsis:"
+    puts "    $progname \[-a\] \[-d path\] \[-f field1\[,field2,...\]\] \[-o outfile\]"
+    puts "        infile1 \[infile2 ...\]"
+    puts ""
+    puts "Description:"
+    puts "    Convert any number of UM (or PP) files into Netcdf files in"
+    puts "    the current directory. Output Netcdf files have the same name"
+    puts "    as the corresponding input file but with '.nc' appended to the"
+    puts "    name (or replacing '.pp' if the input is a PP file) unless"
+    puts "    the -a option is given."
+    puts ""
+    puts "    -a, --convert-months"
+    puts "        Convert month names to numbers in the output file name."
+    puts "        For example xfexaa.pmi2dec would become xfexaa.pmi2_012.nc."
+    puts ""
+    puts "    -d path, --directory path"
+    puts "        Place all output files in the specified directory."
+    puts ""
+    puts "    -f field1\[,field2,...\], --fields field1\[,field2,...\]"
+    puts "        Only convert the fields with identifiers specified by the"
+    puts "        comma separated list."
+    puts ""
+    puts "    -h, --help"
+    puts "        Show this help screen."
+    puts ""
+    puts "    -n, --dry-run"
+    puts "        Print what would be done without actually doing it. No"
+    puts "        conversions take place when using the -n option but names"
+    puts "        of input and output files will be printed on the screen."
+    puts ""
+    puts "    -o outfile, --output outfile"
+    puts "        Write all output to a single file. This requires that all"
+    puts "        selected fields have consistent dimensions. The -a option"
+    puts "        has no effect when using the -o option."
+    puts ""
+    puts "Examples:"
+    puts "    $progname xfexaa.pmi2oct"
+    puts "        Convert the UM file 'xfexaa.pmi2oct' to Netcdf. The output"
+    puts "        file will be named 'xfexaa.pmi2oct.nc."
+    puts ""
+    puts "    $progname -a xfexaa.pmi2oct.pp"
+    puts "        Convert the PP file 'xfexaa.pmi2oct.pp' to Netcdf. The"
+    puts "        output will be named 'xfexaa.pmi2_010.nc'"
+    puts ""
+    puts "    $progname -f 88,89,149,187,188,190 xfexaa.pmi2oct"
+    puts "        Convert the specified field numbers from the UM file"
+    puts "        'xfexaa.pmi2oct' to Netcdf."
+    puts ""
+    puts "    $progname -o outfile.nc -f 88 xfexaa.pm*"
+    puts "        Convert field 88 from the files matching the pattern"
+    puts "        'xfexaa.pm*' and write them to a single Netcdf file"
+    puts "        named 'outfile.nc'."
+    puts ""
+    puts "Author:"
+    puts "    Written by Andrew Dawson <dawson@atm.ox.ac.uk>."
+    puts ""
+}
+
+# Check that at least one command line argument was given. If not then
+# just display the usage and exit cleanly.
+if { $argc == 0 } {
+    show_usage
+    exit 0
+}
+
+# Set default values for options handling variables.
+set alphaconv 0
+set hasfieldlist 0
+set nextisfieldlist 0
+set singleoutfile 0
+set nextisoutfile 0
+set hasoutdir 0
+set nextisoutdir 0
+set dryrun 0
+set nfile 0
+
+# Parse the command line arguments.
+foreach arg $argv {
+    if $nextisfieldlist {
+        set fields $arg
+        set nextisfieldlist 0
+    } elseif $nextisoutfile {
+        set outfilename $arg
+        set nextisoutfile 0
+    } elseif $nextisoutdir {
+        set outdir $arg
+        set nextisoutdir 0
+    } else {
+        switch -glob -- $arg {
+            -a { set alphaconv 1 }
+            -d { set hasoutdir 1; set nextisoutdir 1 }
+            -f { set hasfieldlist 1; set nextisfieldlist 1 }
+            -h { show_usage; exit 0 }
+            -n { set dryrun 1 }
+            -o { set singleoutfile 1; set nextisoutfile 1 }
+            --convert-months { set alphaconv 1 }
+            --directory { set hasoutdir 1; set nextisoutdir 1 }
+            --fields { set hasfieldlist 1; set nextisfieldlist 1 }
+            --help { show_usage; exit 0 }
+            --dry-run { set dryrun 1}
+            --output { set singleoutfile 1; set nextisoutfile 1 }
+            -* { puts stderr "unknown option $arg, use -h or --help for help"; exit 1 }
+            default {
+                lappend files $arg
+                set nfile [ expr $nfile + 1 ]
+            }
+        }
+    }
+}
+
+# Verify that parsing is complete, if not print an error message.
+if $nextisfieldlist {
+    puts stderr "-f must have a field list, use -h or --help for help"
+    exit 1
+}
+if $nextisoutfile {
+    puts stderr "-o must have a file name, use -h or --help for help"
+    exit 1
+}
+if $nextisoutdir {
+    puts stderr "-d must have a directory path, use -h or --help for help"
+    exit 1
+}
+
+# Check that at least one input file was given.
+if {$nfile == 0} {
+    puts stderr "no input files, use -h or --help for help"
+    exit 1
+}
+
+# Parse the field list string into a format acceptable by Convsh.
+if $hasfieldlist {
+    set fieldlist [ join [ split $fields "," ] " "]
+} else {
+    set fieldlist -1
+}
+
+# If an output directory is specified, make sure it has a trailing '/'.
+if $hasoutdir {
+    if { [ string index $outdir end ] != "/" } {
+        set outdir "$outdir/"
+    }
+}
+
+# Set the convsh file reading/writing parameters.
+set umlong 1
+set filetype 0
+set outformat netcdf
+
+# Define a hash table mapping short month names to numeric equivalents.
+array set alphahash {
+    jan "_001" feb "_002" mar "_003" apr "_004" may "_005" jun "_006"
+    jul "_007" aug "_008" sep "_009" oct "_010" nov "_011" dec "_012"
+}
+
+# Loop over every input file, either writing it to output or just
+# string the data. If a file cannot be read a warning is printed.
+foreach infile $files {
+    if { $singleoutfile == 0 } {
+        # Get the file extension
+        set fext [ file extension $infile ]
+        if { $fext == ".pp" } {
+            # PP-files need the .pp extension removing.
+            set outfile [ file tail [ file rootname $infile ] ]
+        } else {
+            set outfile [ file tail $infile ]
+        }
+        # Convert date characters to numeric form if -a option is set.
+        if $alphaconv {
+            set endchars [ string range $outfile end-2 end ]
+            if { [ info exists alphahash($endchars) ] != 0 } {
+                set numeric $alphahash($endchars)
+                set outfile [ string replace $outfile end-2 end $numeric ]
+            }
+        }
+        set outfile "$outfile.nc"
+    } else {
+        set outfile $outfilename
+    }
+    if $hasoutdir {
+        set outfile "$outdir$outfile"
+    }
+    # Read the current input file, printing a warning message if the
+    # file could not be read.
+    if $dryrun {
+        puts "attempting to read file $infile"
+    } else {
+        if [ catch { readfile $filetype $infile } ] {
+            puts stderr "failed to read input file: $infile"
+            continue
+        }
+    }
+    if { $singleoutfile == 0 } {
+        if $dryrun {
+            puts "writing fields $fieldlist to file $outfile"
+        } else {
+            # Write the file to netcdf.
+            if [ catch { writefile $outformat $outfile $fieldlist } ] {
+                puts stderr "failed to write output file: $outfile"
+            }
+            # Remove all the file information from Convsh's memory in
+            # preparation for the next file to be read.
+            clearall
+        }
+    }
+}
+
+if $singleoutfile {
+    if $dryrun {
+        puts "writing fields $fieldlist to file $outfile"
+    } else {
+        writefile $outformat $outfile $fieldlist
+        clearall
+    }
+}
+
